@@ -177,3 +177,71 @@ Lambda forces stateless design; watch DB connection counts (DynamoDB is HTTP-bas
 ### Commit message
 `feat(app): scaffold NestJS docs module with validation, filter, config and unit tests`
 
+---
+
+## Phase 3: DynamoDB in depth
+
+### Key design (from access patterns)
+| Item | PK | SK | GSI1PK | GSI1SK |
+|---|---|---|---|---|
+| Doc | `DOC#<id>` | `METADATA` | `USER#<userId>` | `DOC#<createdAt>` |
+
+Access patterns: A1 create (Put + attribute_not_exists), A2 get (GetItem, ConsistentRead), A3 list by user newest-first (Query GSI1, ScanIndexForward=false), A4 mark uploaded (UpdateItem + attribute_exists).
+
+### How DynamoDB works
+Partition key hashed -> partition (<=10 GB, ~3000 RCU/1000 WCU each); items sorted by SK in a partition (item collection); 3-AZ replication; no joins/OFFSET. Query reads within a key, Scan reads everything. GSI: own keys, eventually consistent, extra writes, can be added later. LSI: same PK, must exist at table creation, 10 GB collection limit, strong reads OK. On-demand vs provisioned; 400 KB item limit; TTL (deletes within ~48h, free); Streams (24h ordered change log); transactions (2x cost, <=100 items); batch ops (not atomic, handle UnprocessedItems).
+
+RCU = 1 strongly consistent 4 KB read/s (0.5 eventual, 2 transactional); WCU = 1 KB write/s (2 transactional); round UP.
+
+### Decisions + trade-offs
+- Single table with prefixed keys: one resource to secure/manage, related items in one query; harder to read and to change access patterns later.
+- ConsistentRead on GetItem: read-your-writes for ~1 RCU instead of 0.5; GSIs can't be strongly consistent.
+- `Limit + 1` pagination: one extra item read avoids an empty trailing page.
+- Cursor = base64url(JSON of LastEvaluatedKey), validated (shape + must match requested user); production: sign/encrypt it.
+- toDoc() allow-list: key attributes never leak into API responses.
+- Server-generated UUIDv4 ids (crypto.randomUUID): unguessable, evenly hashed, not time-sortable (UUIDv7/ULID are). Retried POSTs create duplicates -> idempotency keys.
+- Local dev: DynamoDB Local in Docker, throwaway creds (`local`/`local`) so a mistake can never touch real AWS.
+- Projection ALL on GSI1: simplest, costs storage/WCU; KEYS_ONLY/INCLUDE are cheaper but need extra reads.
+
+### Commands used
+- `docker run -d --name dynamodb-local -p 8000:8000 amazon/dynamodb-local` — start DynamoDB Local (in-memory; data lost when the container is removed). `docker ps`, `docker stop|rm dynamodb-local`.
+- `AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local aws dynamodb create-table --endpoint-url http://localhost:8000 ...` — create the table locally (attribute-definitions only for key attrs; key-schema HASH/RANGE; GSI with projection; PAY_PER_REQUEST).
+- `npm install @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb` — low-level client + DocumentClient (marshalling).
+- `npm run test:int` — integration tests (`*.int-spec.ts`, excluded from `npm test`).
+
+### Gotchas
+- `status` is a DynamoDB reserved word: alias with ExpressionAttributeNames (`#status`).
+- UpdateItem is an upsert: add `attribute_exists(PK)` or you create ghost items.
+- PutItem overwrites by default: add `attribute_not_exists(PK)`.
+- SDK rejects `undefined` values unless `removeUndefinedValues: true`.
+- Limit without +1 can yield a cursor to an empty page.
+- Waiters: default minDelay 20s and maxWaitTime must exceed it; a failing `beforeAll` fails every test in the file (read the FIRST error).
+- TS: interfaces have no implicit index signature, so they're not assignable to `Record<string, unknown>`; cast at the boundary where untyped SDK data enters.
+- `npm run` finds the nearest package.json: run it from `app/`, not the repo root.
+- **`npm install` from the wrong folder** silently created a root package.json + node_modules; the app still worked because Node resolution walks UP parent folders, but app/package.json lacked the deps, so CI (`npm ci`) and CDK bundling would have failed with "Cannot find module". Clues: "Missing script" error and `../node_modules` in a stack trace. Fix: delete root install, reinstall inside `app/`. Always check `pwd` before `npm install`.
+- Build caches (`*.tsbuildinfo`) must not be committed; `git rm --cached -f <file>` untracks without deleting.
+- Calling a mocked unit test "proof" is a trap: it can't catch key-design, condition or IAM bugs.
+
+### Glossary
+- **Partition / partition key / sort key / item collection:** storage shard / its hashed key / ordering key within it / all items sharing a PK.
+- **GSI / LSI:** index with its own keys (any time, eventual) / same PK, different SK (creation time only).
+- **Hot partition:** one key value getting disproportionate traffic.
+- **RCU / WCU:** read / write capacity units (4 KB / 1 KB).
+- **On-demand:** pay per request. **Provisioned:** reserve capacity.
+- **Marshalling:** converting JS values to DynamoDB's typed wire format (`{S: "x"}`) and back.
+- **ConditionExpression:** server-side atomic precondition on a write.
+- **LastEvaluatedKey / ExclusiveStartKey:** where a Query stopped / where the next one resumes.
+- **Reserved word / ExpressionAttributeNames:** keywords that can't be used raw / aliases (`#name`).
+- **Idempotency:** repeating an operation has the same effect as doing it once.
+- **Waiter:** SDK helper that polls until a resource reaches a state.
+
+### Interview Q&A (model answers)
+1. **Why does PK=DOC#id avoid hot partitions; when could the GSI be hot?** Random UUIDs hash evenly. GSI1PK=USER#id puts one user's docs in one index partition; a very heavy user can exceed per-partition limits. Mitigate by write-sharding the key (USER#id#0..N) and merging reads.
+2. **Why Limit+1?** DynamoDB returns LastEvaluatedKey whenever Limit stopped the read, even if nothing remains, causing an empty last page; one extra item tells us if more exist.
+3. **How do you stop POST overwriting; what error?** `ConditionExpression: attribute_not_exists(PK)` evaluated atomically server-side; failure = ConditionalCheckFailedException -> domain error -> 409. Without it PutItem silently replaces.
+4. **Cost: 6 KB item, 100 strongly consistent reads/s?** ceil(6/4)=2 RCU per read -> 200 RCU; eventual: 100 RCU.
+5. **Why not store files in DynamoDB?** 400 KB item limit, large items burn capacity, S3 is cheaper and built for objects; store metadata + key only.
+
+### Commit message
+`feat(app): add DynamoDB repository with conditional writes, GSI pagination and integration tests`
+
