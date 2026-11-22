@@ -13,6 +13,10 @@ export function validateEnv(env: Record<string, unknown>) {
     throw new Error('TABLE_NAME is required (the DynamoDB table name)');
   }
 
+  if (typeof env.BUCKET_NAME !== 'string' || env.BUCKET_NAME.length === 0) {
+    throw new Error('BUCKET_NAME is required (the S3 bucket for uploads)');
+  }
+
   // DYNAMODB_ENDPOINT is optional: set it only for DynamoDB Local.
   return { ...env, PORT: port };
 }

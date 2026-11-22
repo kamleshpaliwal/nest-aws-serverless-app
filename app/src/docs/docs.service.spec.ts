@@ -6,17 +6,25 @@ import { DocsService } from './docs.service';
 
 describe('DocsService', () => {
   let service: DocsService;
-  let repo: jest.Mocked<DocsRepository>;
 
-  // Fresh fake + fresh service before EVERY test, so no test can see another's
+  // Each mock lives in its own variable and the fake repository is built from them.
+  // Asserting on `create` (not `repo.create`) avoids the unbound-method lint warning.
+  let create: jest.Mock;
+  let getById: jest.Mock;
+  let listByUser: jest.Mock;
+
+  // Fresh fakes + fresh service before EVERY test, so no test can see another's
   // call counts or return values (shared state = flaky, order-dependent tests).
   beforeEach(async () => {
-    repo = {
-      create: jest.fn(),
-      getById: jest.fn(),
-      listByUser: jest.fn(),
+    create = jest.fn();
+    getById = jest.fn();
+    listByUser = jest.fn();
+    const repo: DocsRepository = {
+      create,
+      getById,
+      listByUser,
       markUploaded: jest.fn(),
-    } as jest.Mocked<DocsRepository>;
+    };
 
     const moduleRef = await Test.createTestingModule({
       providers: [DocsService, { provide: DocsRepository, useValue: repo }],
@@ -27,7 +35,7 @@ describe('DocsService', () => {
 
   describe('create', () => {
     it('saves a PENDING doc with generated id and timestamps', async () => {
-      repo.create.mockImplementation(async (doc) => doc); // echo what it receives
+      create.mockImplementation(async (doc: Doc) => doc); // echo what it receives
 
       const result = await service.create({ userId: 'u1', title: 'Hello' });
 
@@ -35,11 +43,11 @@ describe('DocsService', () => {
       expect(result.userId).toBe('u1');
       expect(result.id).toMatch(/^[0-9a-f-]{36}$/); // UUID shape
       expect(result.createdAt).toBe(result.updatedAt);
-      expect(repo.create).toHaveBeenCalledTimes(1);
+      expect(create).toHaveBeenCalledTimes(1);
     });
 
     it('does not let the caller choose the status', async () => {
-      repo.create.mockImplementation(async (doc) => doc);
+      create.mockImplementation(async (doc: Doc) => doc);
 
       // A client smuggling status through (the pipe normally blocks this).
       const dto = { userId: 'u1', title: 'x', status: 'UPLOADED' } as never;
@@ -59,13 +67,13 @@ describe('DocsService', () => {
         createdAt: '2026-01-01T00:00:00.000Z',
         updatedAt: '2026-01-01T00:00:00.000Z',
       };
-      repo.getById.mockResolvedValue(doc);
+      getById.mockResolvedValue(doc);
 
       await expect(service.get('d1')).resolves.toEqual(doc);
     });
 
     it('throws NotFoundException when the doc does not exist', async () => {
-      repo.getById.mockResolvedValue(undefined);
+      getById.mockResolvedValue(undefined);
 
       await expect(service.get('missing')).rejects.toBeInstanceOf(
         NotFoundException,
@@ -75,11 +83,11 @@ describe('DocsService', () => {
 
   describe('list', () => {
     it('passes userId, limit and cursor to the repository unchanged', async () => {
-      repo.listByUser.mockResolvedValue({ items: [] });
+      listByUser.mockResolvedValue({ items: [] });
 
       await service.list('u1', 10, 'abc');
 
-      expect(repo.listByUser).toHaveBeenCalledWith('u1', 10, 'abc');
+      expect(listByUser).toHaveBeenCalledWith('u1', 10, 'abc');
     });
   });
 });

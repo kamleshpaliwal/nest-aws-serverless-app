@@ -1,0 +1,14 @@
+{
+  // Used ONLY to compile the Lambda entry points (and everything they import) into
+  // app/build/lambda. CDK then bundles that plain JavaScript with esbuild.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./build/lambda",
+    "rootDir": "./src",
+    "declaration": false,
+    "incremental": false,
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.spec.ts", "src/**/*.int-spec.ts"]
+}

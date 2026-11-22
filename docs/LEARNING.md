@@ -245,3 +245,65 @@ RCU = 1 strongly consistent 4 KB read/s (0.5 eventual, 2 transactional); WCU = 1
 ### Commit message
 `feat(app): add DynamoDB repository with conditional writes, GSI pagination and integration tests`
 
+---
+
+## Phases 4-7: Lambda, API Gateway, S3, CDK, first deploy (22 Nov 2026)
+
+### Architecture as deployed (stack `DocsApiStack`, account 933022260230, ap-south-1)
+HTTP API (`ANY /{proxy+}`) -> `ApiFunction` (NestJS via @codegenie/serverless-express, 512 MB, 10 s) -> `TableV2` (PK/SK + GSI1, on-demand). `POST /docs/:id/upload-url` presigns a PUT to `uploads/<docId>`; S3 `ObjectCreated` (prefix `uploads/`) -> `UploadedFunction` (plain handler, 256 MB, DLQ) -> `UpdateItem status=UPLOADED`. Log groups retention 7 days. Deploy took ~80 s.
+
+### Lambda (Phase 4)
+- Execution environment = Firecracker microVM, one request at a time; INIT (runtime + top-level code) runs once, INVOKE per request; warm reuse for minutes. Concurrency default 1000/region. Memory sets CPU. Timeout max 15 min, sync payload 6 MB, /tmp 512 MB-10 GB. Execution role provides credentials (no keys in code). Price ~$0.20/M requests + ~$0.0000167/GB-s; always-free 1M req + 400k GB-s.
+- Handler caches the bootstrap PROMISE at module level (shared by overlapping calls; cleared on failure so a transient error isn't cached). `app.init()` not `listen()`.
+- HTTP API vs REST API: HTTP ~$1/M, lower latency, JWT authorizers, CORS; REST ~$3.50/M adds API keys/usage plans, request validation, WAF, caching. Payload format v2; integration timeout 30 s; payload 10 MB.
+- **esbuild + Nest DI gotcha:** esbuild doesn't emit `design:paramtypes`. Reproduced locally: Nest 12 warns "X has no decorator metadata ... esbuild don't emit it", then `DynamoDocsRepository` crashed at bootstrap (`config` undefined). Explicit `@Inject(Token)` needs no metadata (index [0] worked, [1] failed). Fix: compile with tsc first, then bundle the JS. Also mark Nest's optional packages (`@nestjs/microservices`, `@nestjs/websockets`, subpaths) external or esbuild fails to resolve.
+- **Final build design:** `npm run build:lambda` (tsc -p tsconfig.lambda.json -> app/build/lambda), run automatically by cdk.json `app` command; CDK bundles `build/lambda/*.js`. We first tried `bundling.preCompilation` (works, needs `esbuildArgs --resolve-extensions .js` so esbuild picks compiled JS) but it emits .js/.d.ts/.js.map NEXT TO the sources (it swaps .ts->.js in place), which can shadow .ts in Jest (moduleFileExtensions js before ts). Trade-off: convenience vs source-tree pollution.
+- Verified bundles contain metadata: `grep -c design:paramtypes infra/cdk.out/asset.*/index.js` (45 / 30 for our two functions, 0 for CDK helper).
+
+### S3 + presigned URLs (Phase 5)
+- Buckets/keys/objects; 11-nines durability; strong read-after-write; storage classes; PUT up to 5 GB (multipart up to 5 TB); private + Block Public Access; bucket policy (resource) vs IAM policy (identity); SSE-S3 default; CORS needed for browser PUT.
+- SigV4 presign is local math (no network call). Signature covers method, path, signed headers, expiry; URL carries the signer's permissions; with role credentials the URL's real lifetime is min(expiresIn, credential expiry) and includes X-Amz-Security-Token. The signing role itself needs s3:PutObject (we granted `uploads/*` only).
+- **GOTCHA found by the e2e test:** SDK v3 does NOT sign `Content-Type` by default, so a URL minted for text/plain accepted image/png (200 instead of 403). Fix: `getSignedUrl(..., { signableHeaders: new Set(['content-type']) })`. Verified option in @smithy/types.
+- Presigned PUT can't cap size; presigned POST (content-length-range) can; multipart for large files; allow-list content types (stored XSS via text/html).
+- S3 event handling: async invoke, at-least-once, out-of-order possible, 2 retries then DLQ; object key URL-encoded ("+" = space); idempotent conditional update; unknown doc -> log, don't throw (retry can't help); unexpected error -> throw (retry).
+
+### CDK / CloudFormation (Phase 6)
+- CFN: template, stack, resource (logical vs physical ID), parameters, outputs, intrinsics (Ref, GetAtt, Sub, Join), change set (add [+], modify [~], delete [-], replace [-/+]), rollback. CDK synthesizes CFN; construct tree App > Stack > Construct; L1/L2/L3; tokens; assets in bootstrap bucket (`cdk-hnb659fds-assets-<acct>-<region>`).
+- Logical ID = construct path + hash: renaming a construct id REPLACES the resource (data loss for table/bucket).
+- CDK CLI (2.1149) and aws-cdk-lib (2.278) are versioned independently; CLI pinned in infra/package.json, run with `npx cdk`.
+- cdk.json `context` = feature flags (opt-in to new defaults); `app` = command CDK runs to build the tree; cdk.context.json caches lookups (commit it).
+- Template notes: TableV2 = `AWS::DynamoDB::GlobalTable`; `RemovalPolicy.DESTROY` -> DeletionPolicy Delete (default is RETAIN); BucketPolicy denies non-TLS; extra resources CDK adds: auto-delete custom resource Lambda, S3 notification custom resource (Python Lambda), SQS DLQ.
+- Least privilege: API role = GetItem/PutItem/Query (+ /index/*) and s3:PutObject on `<bucket>/uploads/*`; Uploaded role = UpdateItem + sqs:SendMessage to DLQ. (`table.grant` also adds /index/* - slightly broader than needed.)
+- CDK vs SAM vs Terraform: CDK = real language + CFN engine, AWS-only; SAM = YAML, local invoke; Terraform = multi-cloud, own state.
+
+### Deploy + e2e (Phase 7)
+- `npx cdk diff --profile docs-api` then `npx cdk deploy --profile docs-api` (from infra/). Outputs: ApiUrl, BucketName, TableName.
+- `node scripts/e2e.mjs <api-url>`: 14 assertions covering health, validation, create/get/404/400, presign, wrong content-type 403, upload, async UPLOADED via S3 event, pagination, bad cursor.
+- Cold start (new environment after deploy) 1712 ms vs ~327 ms warm.
+
+### Gotchas (this stretch)
+- `aws login` sessions are short-lived: "Your session has expired" -> `aws login --profile docs-api`. CDK said "no credentials have been configured" when the session was expired. If CDK can't read login sessions: `eval "$(aws configure export-credentials --profile docs-api --format env)"` and omit --profile.
+- zsh expands unquoted `*` in arguments: quote `'--external:@nestjs/websockets/*'`.
+- nvm global packages are per Node version: a global `cdk` vanished after switching Node; use `npx cdk` / project devDependency.
+- Fetch keep-alive to S3 can give ECONNRESET on reused sockets: retry idempotent PUTs.
+- Waiters: maxWaitTime must exceed minDelay (20 s default).
+- `Handler: index.handler`: CDK names the bundle index.js.
+- Wrong Content-Type is only rejected if signed (see above); test negative cases, don't assume.
+
+### Commands used
+`npx aws-cdk init app --language typescript --generate-only`, `npm install -D esbuild`, `npx cdk synth|diff|deploy --profile docs-api`, `npm run build:lambda`, `npx esbuild ... --bundle --platform=node --target=node22 --external:...`, `grep -c design:paramtypes ...`, `node scripts/e2e.mjs <url>`.
+
+### Glossary
+Execution environment, cold/warm start, Init/Invoke, concurrency, execution role, HTTP API, payload format v2, proxy route, Firecracker, esbuild, tree-shaking, external module, preCompilation, SigV4, presigned URL, signable headers, multipart upload, SSE-S3, Block Public Access, bucket policy, CORS preflight, dead-letter queue, at-least-once, idempotent, CloudFormation (template/stack/logical ID/change set/rollback), CDK (App/Stack/Construct/L1-L3/token/synth/asset/feature flag), custom resource, removal policy, least privilege, `aws login` session.
+
+### Interview Q&A (model answers)
+1. **Why does a Nest app need tsc before esbuild on Lambda?** esbuild transpiles per file and doesn't emit `design:paramtypes`; Nest's DI reads it, so injected params are undefined (crash at bootstrap or on first use). Compile with tsc (metadata), then bundle JS; or use explicit `@Inject`.
+2. **Presigned PUT: what stops a user uploading a different content type or a huge file?** Content-Type only if signed (`signableHeaders`; SDK v3 doesn't by default); size not at all with PUT -> use presigned POST with content-length-range, or validate in the S3-event Lambda and delete.
+3. **S3 event delivered twice / handler fails?** At-least-once; idempotent conditional update; unknown doc logged not thrown; real errors thrown -> 2 retries -> DLQ.
+4. **What happens in CloudFormation if you rename a construct id?** New logical ID -> create new + delete old (replacement); for stateful resources that means data loss; use RemovalPolicy.RETAIN/ deletion protection and review `cdk diff` for [-/+].
+5. **Cold start causes and mitigations?** Init = runtime + bundle load + Nest bootstrap; smaller bundles, less top-level work, more memory, provisioned concurrency, lighter framework; measured 1.7 s cold vs ~0.3 s warm.
+6. **Why HTTP API with a catch-all route + NestJS?** Cheaper/faster than REST API; Nest routes internally; trade-off: one big function (shared cold start/blast radius) vs function per route.
+
+### Commit message
+`feat: add Lambda handlers, S3 presigned uploads, CDK stack and e2e script`
+
