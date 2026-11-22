@@ -1,0 +1,67 @@
+name: PR checks
+
+on:
+  pull_request:
+    branches: [main]
+
+# id-token: write lets the job REQUEST a GitHub OIDC token (needed to assume the AWS role).
+# contents: read is all the code checkout needs. Everything else is denied by default.
+permissions:
+  id-token: write
+  contents: read
+
+# A new push to the same PR cancels the older run.
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm # caches ~/.npm, keyed by the lockfiles below
+          cache-dependency-path: |
+            app/package-lock.json
+            infra/package-lock.json
+
+      # `npm ci` = clean install exactly from the lockfile (fails if package.json and lockfile disagree).
+      - name: Install app dependencies
+        run: npm ci
+        working-directory: app
+
+      - name: Install infra dependencies
+        run: npm ci
+        working-directory: infra
+
+      - name: Lint
+        run: npm run lint
+        working-directory: app
+
+      - name: Unit tests
+        run: npm test
+        working-directory: app
+
+      - name: Compile Lambda sources
+        run: npm run build:lambda
+        working-directory: app
+
+      # Exchange the GitHub OIDC token for temporary credentials of the READ-ONLY plan role.
+      - name: Assume AWS plan role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::933022260230:role/CiBootstrapStack-GithubPlanRoleA77EBD3A-Dg4WyCRwcNs1
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Shows exactly what merging this PR would change in AWS. Changes nothing.
+      - name: CDK diff
+        run: npx cdk diff DocsApiStack -c alertEmail=${{ vars.ALERT_EMAIL }}
+        working-directory: infra

@@ -16,3 +16,7 @@ coverage/
 # macOS
 .DS_Store
 *.tsbuildinfo
+.bundle-test/
+
+# Compiled Lambda sources (npm run build:lambda), bundled by CDK
+app/build/

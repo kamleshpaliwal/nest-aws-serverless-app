@@ -1,0 +1,70 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # allows a manual run from the Actions tab
+
+permissions:
+  id-token: write
+  contents: read
+
+# Never cancel a deploy halfway: queue the next one instead.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            infra/package-lock.json
+
+      - name: Install app dependencies
+        run: npm ci
+        working-directory: app
+
+      - name: Install infra dependencies
+        run: npm ci
+        working-directory: infra
+
+      - name: Lint
+        run: npm run lint
+        working-directory: app
+
+      - name: Unit tests
+        run: npm test
+        working-directory: app
+
+      # Only reached if everything above passed.
+      - name: Assume AWS deploy role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::933022260230:role/CiBootstrapStack-GithubDeployRoleB0CF66A5-vBb4ITc7IYGk
+          aws-region: ${{ env.AWS_REGION }}
+
+      # cdk.json first runs `npm run build:lambda`, then synthesizes, bundles and deploys.
+      # --require-approval never: there is no human at a prompt in CI (the PR diff was the review).
+      - name: CDK deploy
+        run: >
+          npx cdk deploy DocsApiStack
+          --require-approval never
+          --outputs-file ../cdk-outputs.json
+          -c alertEmail=${{ vars.ALERT_EMAIL }}
+        working-directory: infra
+
+      # Post-deploy smoke test: the same e2e script, against the API we just deployed.
+      - name: End-to-end test
+        run: node scripts/e2e.mjs "$(node -p "require('./cdk-outputs.json').DocsApiStack.ApiUrl")"
