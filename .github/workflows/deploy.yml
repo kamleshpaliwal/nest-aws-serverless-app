@@ -48,6 +48,16 @@ jobs:
         run: npm test
         working-directory: app
 
+      # TEMPORARY DEBUG STEP (remove once the first deploy works): print this run's token claims.
+      - name: Debug - show OIDC token claims
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            const { iss, aud, sub, repository, ref, event_name } = claims;
+            core.info(JSON.stringify({ iss, aud, sub, repository, ref, event_name }, null, 2));
+
       # Only reached if everything above passed.
       - name: Assume AWS deploy role (OIDC)
         uses: aws-actions/configure-aws-credentials@v4

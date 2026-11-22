@@ -2,7 +2,11 @@ import { CfnOutput, Duration, Stack, StackProps } from 'aws-cdk-lib/core';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 
-const GITHUB_REPO = 'kamleshpaliwal/nest-aws-serverless-app';
+// The OIDC `sub` claim for this repo contains IMMUTABLE numeric ids (owner id after "@", repo id
+// after "@"), not just names: names can be released and re-registered by someone else
+// ("repo-jacking"), ids never are. Value taken from a real token (printed by a debug step):
+//   repo:kamleshpaliwal@37514370/nest-aws-serverless-app@1465804170:pull_request
+const GITHUB_SUBJECT_REPO = 'kamleshpaliwal@37514370/nest-aws-serverless-app@1465804170';
 const GITHUB_OIDC_HOST = 'token.actions.githubusercontent.com';
 const CDK_QUALIFIER = 'hnb659fds'; // default `cdk bootstrap` qualifier (see the CDKToolkit stack)
 
@@ -41,7 +45,7 @@ export class CiBootstrapStack extends Stack {
     // ---- Pull requests: read-only. Can run `cdk diff`, cannot deploy anything.
     const planRole = githubRole(
       'GithubPlanRole',
-      `repo:${GITHUB_REPO}:pull_request`,
+      `repo:${GITHUB_SUBJECT_REPO}:pull_request`,
       'GitHub Actions on pull requests: cdk diff only',
     );
     planRole.addToPolicy(
@@ -55,7 +59,7 @@ export class CiBootstrapStack extends Stack {
     // The CI role itself holds almost no permissions; the bootstrap roles do the real work.
     const deployRole = githubRole(
       'GithubDeployRole',
-      `repo:${GITHUB_REPO}:ref:refs/heads/main`,
+      `repo:${GITHUB_SUBJECT_REPO}:ref:refs/heads/main`,
       'GitHub Actions on main: cdk deploy',
     );
     deployRole.addToPolicy(
