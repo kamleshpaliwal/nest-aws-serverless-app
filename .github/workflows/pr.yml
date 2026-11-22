@@ -54,6 +54,18 @@ jobs:
         run: npm run build:lambda
         working-directory: app
 
+      # TEMPORARY DEBUG STEP (remove once OIDC works): print the claims of the OIDC token
+      # this run is issued, so we can compare `sub` and `aud` with the role's trust policy.
+      # Only the decoded payload is printed; the token itself is never logged.
+      - name: Debug - show OIDC token claims
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            const { iss, aud, sub, repository, ref, event_name, job_workflow_ref } = claims;
+            core.info(JSON.stringify({ iss, aud, sub, repository, ref, event_name, job_workflow_ref }, null, 2));
+
       # Exchange the GitHub OIDC token for temporary credentials of the READ-ONLY plan role.
       - name: Assume AWS plan role (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
