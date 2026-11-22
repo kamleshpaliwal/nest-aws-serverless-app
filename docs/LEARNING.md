@@ -307,3 +307,40 @@ Execution environment, cold/warm start, Init/Invoke, concurrency, execution role
 ### Commit message
 `feat: add Lambda handlers, S3 presigned uploads, CDK stack and e2e script`
 
+---
+
+## Phases 8-9: Observability and CI/CD with OIDC (22 Nov 2026)
+
+**Note: the Lambda runtime and everything else now run Node 24** (supersedes "Node 22" above). Reason: Jest needs Node >= 24.9 to load Nest 12's ESM-only packages; local, CI and Lambda must match (`.nvmrc` = 24, `engines`, `setup-node 24`, `Runtime.NODEJS_24_X`).
+
+### Observability (Phase 8)
+- Lambda writes START/END/REPORT lines to its log group (retention set to 7 days in CDK; default is forever and billed). REPORT has Duration, Billed Duration, Max Memory Used and `Init Duration` (present only on cold starts).
+- Logs Insights: cold starts `filter @type = "REPORT" | stats count() as n, sum(ispresent(@initDuration)) as cold, avg(@initDuration)`; errors `filter level = "error"` (our logs are JSON so fields are auto-discovered); slow requests sort by `@duration`.
+- Metrics: Lambda (Invocations, Errors, Duration, Throttles, ConcurrentExecutions), API Gateway HTTP (Count, 4xx, 5xx, Latency, IntegrationLatency), DynamoDB (ConsumedRead/WriteCapacityUnits, ThrottledRequests, SystemErrors).
+- **Design insight:** Lambda's `Errors` metric counts only unhandled invocation failures. Our Nest exception filter turns errors into HTTP 500 responses, so Lambda sees success. Alarm on API Gateway `5xx` (user-visible) + UploadedFunction `Errors` + DLQ depth (async path).
+- Alarms (CDK): SNS topic + email subscription (address passed via context `-c alertEmail=...`, repo variable `ALERT_EMAIL` in CI; subscription needs a confirmation click); `treatMissingData: NOT_BREACHING`; period 5 min.
+- **Real incident (alarm fired):** after the Node 24 deploy the API returned 5xx; alarm email: `OK -> ALARM`, datapoint 8.0 in the 12:39 window, fired 12:44:50 UTC (~5 min detection latency). No OK-action configured, so no recovery email. Improvements: 1-minute period, 2-of-3 evaluation, `addOkAction`, canary deploys with alarm-based rollback.
+
+### CI/CD with GitHub Actions + OIDC (Phase 9)
+- Workflows: `.github/workflows/pr.yml` (pull_request: ci install, lint, test, build:lambda, assume READ-ONLY plan role, `cdk diff`) and `deploy.yml` (push to main: install, lint, test, assume deploy role, `cdk deploy --require-approval never --outputs-file`, then post-deploy `scripts/e2e.mjs`). `permissions: id-token: write` is required for OIDC; `concurrency` cancels old PR runs but queues deploys; `npm ci` installs exactly from the lockfile; `setup-node cache: npm` caches ~/.npm keyed by lockfiles.
+- OIDC flow: GitHub mints a short-lived JWT per run (iss, aud, sub, repository, ref, exp, jti) signed with ITS long-lived private key (rotated by GitHub; public keys at `.../.well-known/jwks`); AWS STS verifies the signature using the issuer's published JWKS (fetched at verification time, validated over TLS), then checks the role's trust policy conditions on `aud` and `sub`; returns ~1 h credentials. Registering the provider in AWS only records issuer URL + audience: no keys are exchanged. Keys are GitHub-wide, so the `sub` condition is the actual security boundary.
+- CDK `CiBootstrapStack` (deployed once by hand with admin creds because a pipeline can't create its own permissions): `OidcProviderNative` + `GithubPlanRole` (sub = pull_request, may only assume the CDK `lookup` role) + `GithubDeployRole` (sub = main branch, may assume the CDK deploy / file-publishing / image-publishing / lookup roles). CI roles are tiny; the bootstrap roles carry the real permissions.
+- **GOTCHA: the `sub` claim contains immutable numeric ids** for newer repos: `repo:<owner>@<ownerId>/<repo>@<repoId>:pull_request` (and `...:ref:refs/heads/main`). A name-only trust policy gives "Not authorized to perform sts:AssumeRoleWithWebIdentity". Found by printing the token claims in a temporary `actions/github-script` step (`core.getIDToken`). IDs prevent "repo-jacking" (re-registering a released name). Using an Environment changes `sub` to `environment:<name>`.
+- Dev/prod: GitHub Environments (required reviewers = manual approval), one deploy role + stack per environment, trust policy matched to `environment:prod`. Extension: Lambda versions/aliases + CodeDeploy canary with alarm-based automatic rollback.
+
+### CI failures we hit and fixed (good STAR material)
+1. **Jest "Must use import to load ES Module"**: CI ran Node 22, laptop Node 24. Fix: Node 24 everywhere. Lesson: pin runtime in dev, CI and production.
+2. **`npx --no-install esbuild` fails in CI**: esbuild was declared only in `infra/` but CDK bundles with cwd `app/`. Fix: `npm i -D esbuild` in `app/`. Lesson: declare every tool where it executes; CI = clean checkout.
+3. **`Runtime.CallbackHandlerDeprecated`**: Node 24 Lambda rejects handlers declared with a third `callback` parameter. All requests returned API Gateway's generic `{"message":"Internal Server Error"}` (note: not our Nest error shape). Caught by the post-deploy e2e test and the 5xx alarm. Fix: `async (event, context)`; regression test `handler.length <= 2`. Lesson: runtime upgrades change contracts; test on the real runtime; canary/rollback.
+- Also: repository variables are NOT masked in logs (the alert email was printed); use a secret if that matters.
+
+### Interview Q&A (model answers)
+1. **How does GitHub-to-AWS OIDC work, and what stops another repo using your role?** JWT per run signed by GitHub; STS verifies via JWKS then evaluates trust policy `aud`+`sub` (with immutable ids); other repos get a different `sub`.
+2. **Why do you alarm on API Gateway 5xx rather than Lambda Errors?** Handled exceptions return HTTP 500 from a successful invocation; Lambda Errors misses them.
+3. **How did you diagnose "Not authorized to perform sts:AssumeRoleWithWebIdentity"?** STS gives no detail on purpose; print the token's claims and compare `sub`/`aud` to the policy.
+4. **A deploy broke prod. What do you do and what would prevent it?** Roll back first, then diagnose from logs; prevent with post-deploy smoke tests, staging stack, canary + alarm rollback.
+5. **Why `npm ci` in CI?** Reproducible, lockfile-exact, fails on drift; surfaced undeclared dependencies.
+
+### Commit message
+`chore(ci): remove temporary OIDC debug steps; document phases 8-9`
+
