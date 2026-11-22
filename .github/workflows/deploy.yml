@@ -26,7 +26,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24 # must match the Lambda runtime; Jest needs 24.9+ for Nest's ESM-only packages
           cache: npm
           cache-dependency-path: |
             app/package-lock.json

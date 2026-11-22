@@ -75,7 +75,8 @@ export class DocsApiStack extends Stack {
       minify: false,
     };
     const common = {
-      runtime: lambda.Runtime.NODEJS_22_X,
+      // Keep in sync with .nvmrc and the Node version in the GitHub workflows.
+      runtime: lambda.Runtime.NODEJS_24_X,
       projectRoot: APP_DIR,
       depsLockFilePath: path.join(APP_DIR, 'package-lock.json'),
       bundling,
