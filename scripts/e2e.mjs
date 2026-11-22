@@ -71,6 +71,13 @@ check('upload-url with disallowed content type -> 400', badType.status === 400, 
 const up = await call('POST', `/docs/${doc.id}/upload-url`, { contentType: 'text/plain' });
 check('POST /docs/:id/upload-url -> 200 with url', up.status === 200 && up.json?.url?.includes('X-Amz-Signature'), up.text);
 
+if (!up.json?.url) {
+  // Without a URL none of the upload checks can run; fail clearly instead of crashing.
+  console.log(`\nSTOPPING: no upload URL returned (status ${up.status}): ${up.text}`);
+  console.log(`${failures} CHECK(S) FAILED`);
+  process.exit(1);
+}
+
 // 6. upload the file straight to S3 (it never passes through Lambda)
 const wrongType = await putWithRetry(up.json.url, { 'content-type': 'image/png' }, 'hello');
 check('PUT with WRONG Content-Type -> 403 (signature mismatch)', wrongType.status === 403, String(wrongType.status));

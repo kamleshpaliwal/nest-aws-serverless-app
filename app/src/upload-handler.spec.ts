@@ -1,6 +1,14 @@
 import type { Context, S3Event } from 'aws-lambda';
 import { Doc } from './docs/doc.model';
-import { createHandler, docIdFromKey } from './upload-handler';
+import { createHandler, docIdFromKey, handler } from './upload-handler';
+
+describe('exported Lambda handler', () => {
+  // Regression guard: the Node.js 24 Lambda runtime rejects handlers that declare a third
+  // `callback` parameter (Runtime.CallbackHandlerDeprecated). Function.length = declared params.
+  it('declares at most (event, context) so Node 24 does not treat it as callback-style', () => {
+    expect(handler.length).toBeLessThanOrEqual(2);
+  });
+});
 
 const ID = '3b241101-e2bb-4255-8caf-4136c566a962';
 

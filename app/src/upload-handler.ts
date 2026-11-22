@@ -59,8 +59,11 @@ function buildRepository(): DocsRepository {
 
 let cached: S3Handler | undefined;
 
-/** Configured in CDK as "upload-handler.handler". */
-export const handler: S3Handler = (event, context, callback) => {
+/**
+ * Configured in CDK as "upload-handler.handler".
+ * Exactly (event, context): a 3rd `callback` parameter makes the Node.js 24 runtime reject it.
+ */
+export const handler: S3Handler = async (event, context) => {
   cached ??= createHandler(buildRepository());
-  return cached(event, context, callback);
+  await cached(event, context, () => undefined);
 };
