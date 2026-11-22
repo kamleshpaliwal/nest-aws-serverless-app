@@ -33,8 +33,14 @@ function getServer(): Promise<Handler> {
   return serverPromise;
 }
 
-/** The function Lambda calls. Configured as "lambda.handler" in CDK. */
-export const handler: Handler = async (event, context, callback) => {
+/**
+ * The function Lambda calls. Configured as "lambda.handler" in CDK.
+ *
+ * Declare exactly (event, context): the Node.js 24 runtime treats a handler with a third
+ * `callback` parameter as callback-style and refuses to run it (Runtime.CallbackHandlerDeprecated).
+ */
+export const handler: Handler = async (event, context) => {
   const server = await getServer();
-  return server(event, context, callback);
+  // The adapter's type still asks for a callback; it also returns the result as a promise.
+  return server(event, context, () => undefined);
 };
